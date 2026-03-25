@@ -201,8 +201,8 @@ def survey():
 
     enigh_census_map = extract_enigh_census()
 
-    df_income = process_income_df(enigh_census_map[1])
     df_folio = process_fol_df(enigh_census_map[0], muns)
+    df_income = process_income_df(enigh_census_map[1])
     df_home = process_home_df(enigh_census_map[2])
     df_pop = process_pop_df(enigh_census_map[3])
     return merge_dfs(df_folio, df_income, df_home, df_pop)
