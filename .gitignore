@@ -218,3 +218,4 @@ __marimo__/
 # Extra
 dagster/*
 !dagster/dagster.yml
+*.parquet

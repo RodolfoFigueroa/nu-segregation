@@ -22,13 +22,13 @@ def get_muns_from_zone(
     with postgis_resource.connect() as conn:
         df = pd.read_sql(
             """
-            SELECT "CVEGEO" FROM census_2020_mun
-            WHERE "CVE_MET" = %(zone)s
+            SELECT cvegeo FROM census_2020_mun
+            WHERE cve_met = %(zone)s
             """,
             conn,
             params={"zone": context.partition_key},
         )
-    return df["CVEGEO"].tolist()
+    return df["cvegeo"].tolist()
 
 
 stems = ["vivienda", "ingresos", "hogares", "poblacion"]
@@ -124,7 +124,12 @@ def merge_dfs(
     df_home: pd.DataFrame,
     df_pop: pd.DataFrame,
 ) -> pd.DataFrame:
-    return (
+    df_fol.to_parquet("./test/df_fol.parquet")
+    df_income.to_parquet("./test/df_income.parquet")
+    df_home.to_parquet("./test/df_home.parquet")
+    df_pop.to_parquet("./test/df_pop.parquet")
+
+    out = (
         df_fol.merge(df_pop, how="left")
         .merge(df_income, how="left")
         .merge(df_home, how="left")
@@ -158,20 +163,16 @@ def merge_dfs(
             Sexo=lambda df: (
                 df["Sexo"].astype("category").cat.rename_categories({1: "m", 2: "f"})
             ),
-            Edad=lambda df: (
-                pd.cut(
-                    df["Edad"],
-                    bins=[15, 64, 200],
-                    labels=["p15_64", "p65mas"],
-                    include_lowest=True,
-                ),
+            Edad=lambda df: pd.cut(
+                df["Edad"],
+                bins=[15, 64, 200],
+                labels=["p15_64", "p65mas"],
+                include_lowest=True,
             ),
-            Nivel=lambda df: (
-                pd.cut(
-                    df["Nivel"],
-                    bins=[-1, 0, 2, 3, 100],
-                    labels=["ninguno", "primaria", "secundaria", "posbasica"],
-                ),
+            Nivel=lambda df: pd.cut(
+                df["Nivel"],
+                bins=[-1, 0, 2, 3, 100],
+                labels=["ninguno", "primaria", "secundaria", "posbasica"],
             ),
             SeguroIMSS=lambda df: (
                 df["SeguroIMSS"]
@@ -193,6 +194,8 @@ def merge_dfs(
         .rename(columns={"Ingreso": "Ingreso_orig"})
         .rename(columns={"Ingreso_new": "Ingreso"})
     )
+    out.to_parquet("./survey.parquet")
+    return out
 
 
 @dg.graph_asset(partitions_def=zone_partitions, group_name="survey")

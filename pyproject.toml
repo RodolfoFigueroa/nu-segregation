@@ -17,6 +17,10 @@ dependencies = [
     "pandas>=3.0.1",
     "pandas-stubs>=3.0.0.260204",
     "psycopg2>=2.9.11",
+    "pyarrow>=23.0.1",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "xarray>=2026.2.0",
 ]
 
 [project.scripts]
@@ -28,7 +32,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.2.0",
+    "ipykernel<7",
     "mypy>=1.19.1",
 ]
 
@@ -40,7 +44,7 @@ root_module = "nu_segregation"
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D", "COM812", "PLR2004"]
+ignore = ["D", "COM812", "PLR2004", "PD013"]
 
 [tool.uv.sources]
 dagster-components = { git = "https://github.com/RodolfoFigueroa/dagster-components" }
