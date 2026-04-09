@@ -271,7 +271,9 @@ def get_income_df(
     ).assign(total_ipf=lambda df: df.sum(axis=1))
 
     pop_income.index.name = "cvegeo"
-    pop_income = pop_income.join(df_censo["P_15YMAS"]).rename(columns={"P_15YMAS": "total_census"})
+    pop_income = pop_income.join(df_censo["P_15YMAS"]).rename(
+        columns={"P_15YMAS": "total_census"}
+    )
 
     income_by_ageb = (
         df_ind[agebs]
