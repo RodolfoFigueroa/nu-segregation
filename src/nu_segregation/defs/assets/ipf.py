@@ -253,36 +253,36 @@ def weight_ind_fast(df: pd.DataFrame, ds: xr.DataArray) -> pd.DataFrame:
     return df_w
 
 
+def get_geometries_from_cvegeos(cvegeos: list[str], *, engine):
+    pass
+
+
 def get_income_df(
-    ds: xr.Dataset,
+    ds: xr.DataArray,
     df_censo: pd.DataFrame,
     df_ind: pd.DataFrame,
     data_path: Path,
     agebs: list[str],
 ) -> pd.DataFrame:
-    dim = [d for d in ds.dims if d != "Ingreso"]
-
-    pop_income = pd.concat(
-        [
-            ctable.sum(dim=dim).to_dataframe(name=cvegeo).transpose()
-            for cvegeo, ctable in ds.items()
-            if cvegeo in agebs
-        ]
-    ).assign(total_ipf=lambda df: df.sum(axis=1))
-
-    pop_income.index.name = "cvegeo"
-    pop_income = pop_income.join(df_censo["P_15YMAS"]).rename(
-        columns={"P_15YMAS": "total_census"}
-    )
-
     income_by_ageb = (
         df_ind[agebs]
         .multiply(df_ind["Ingreso_orig"], axis="index")
         .sum()
         .rename("income")
     )
-    pop_income = pop_income.join(income_by_ageb).assign(
-        income_pc=lambda df: df["income"] / df["total_ipf"]
+
+    wanted_dims = [d for d in ds.dims if d not in ["cvegeo", "Ingreso"]]
+    pop_income = (
+        ds.sel(cvegeo=agebs)
+        .sum(dim=wanted_dims)
+        .to_dataframe(name="values")
+        .reset_index()
+        .pivot_table(index="cvegeo", columns="Ingreso", values="values")
+        .assign(total_ipf=lambda df: df.sum(axis=1))
+        .join(df_censo["p_15ymas"])
+        .rename(columns={"p_15ymas": "total_census"})
+        .join(income_by_ageb)
+        .assign(income_pc=lambda df: df["income"] / df["total_ipf"])
     )
 
     # Import geo data

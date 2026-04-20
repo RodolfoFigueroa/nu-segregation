@@ -1,3 +1,4 @@
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 from dagster_components.partitions import zone_partitions
@@ -159,5 +160,18 @@ def census(
             err = f"Counts for {prefix} do not sum up to total working population."
             raise ValueError(err)
 
-    df_censo.to_parquet("./test.parquet")
     return df_censo
+
+
+@dg.asset(key=["census_geometries"], partitions_def=zone_partitions)
+def census_geometries(postgis_resource: PostGISResource) -> gpd.GeoDataFrame:
+    with postgis_resource.connect() as conn:
+        gdf = gpd.read_postgis(
+            """
+            SELECT cvegeo, geometry
+            FROM census_2020_ageb
+            """,
+            conn,
+            geom_col="geometry",
+        )
+    return gdf

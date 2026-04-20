@@ -88,7 +88,7 @@ def get_seg_full(
 
     # Find weighted median
     results_dict["median_MZ"] = ipf.weighted_mean(
-        df_ind.Ingreso_orig.values, df_ind.w_MZ.values
+        df_ind["Ingreso_orig"].to_numpy(), df_ind.w_MZ.values
     )
 
     # Get global segregations and segregation profile
@@ -105,14 +105,16 @@ def get_seg_full(
     )
 
     results_dict["H"] = H
-    return results_dict
 
     # Create a dataframe with population per income bracket per ageb
     # Marginalizing over all other variables in all local
     # contingency tables.
 
     # Also calculates total and per capita income
+
     pop_income = ipf.get_income_df(ds, df_censo, df_ind, data_path, agebs)
+
+    return pop_income
 
     # Keep only agebs witg geometry (error in marco geo?)
     agebs = pop_income[~pop_income.geometry.isna()].cvegeo.to_list()

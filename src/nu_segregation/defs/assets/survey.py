@@ -124,11 +124,6 @@ def merge_dfs(
     df_home: pd.DataFrame,
     df_pop: pd.DataFrame,
 ) -> pd.DataFrame:
-    df_fol.to_parquet("./test/df_fol.parquet")
-    df_income.to_parquet("./test/df_income.parquet")
-    df_home.to_parquet("./test/df_home.parquet")
-    df_pop.to_parquet("./test/df_pop.parquet")
-
     out = (
         df_fol.merge(df_pop, how="left")
         .merge(df_income, how="left")

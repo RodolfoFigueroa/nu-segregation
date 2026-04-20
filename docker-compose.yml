@@ -1,0 +1,14 @@
+services:
+  scheduler:
+    image: ghcr.io/dask/dask:latest
+    container_name: dask-scheduler
+    command: dask scheduler
+    ports:
+      - 8786:8786 # Communication port
+      - 8787:8787 # Dashboard UI
+  
+  worker:
+    image: ghcr.io/dask/dask:latest
+    command: dask worker tcp://scheduler:8786
+    depends_on:
+      - scheduler
