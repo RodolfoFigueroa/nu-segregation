@@ -2,7 +2,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 from dagster_components.partitions import zone_partitions
-from dagster_components.resources import PostGISResource
+from dagster_components.resources import PostgresResource
 from dagster_components.utils import cast_all_columns_to_numeric
 
 import dagster as dg
@@ -80,11 +80,16 @@ def add_health_insurance_cols(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-@dg.asset(key="census", partitions_def=zone_partitions)
+@dg.asset(
+    key="census",
+    io_manager_key="dataframe_manager",
+    partitions_def=zone_partitions,
+    group_name="census",
+)
 def census(
-    context: dg.AssetExecutionContext, postgis_resource: PostGISResource
+    context: dg.AssetExecutionContext, postgres_resource: PostgresResource
 ) -> pd.DataFrame:
-    with postgis_resource.connect() as conn:
+    with postgres_resource.connect() as conn:
         df_censo = (
             pd.read_sql(
                 """
@@ -160,18 +165,30 @@ def census(
             err = f"Counts for {prefix} do not sum up to total working population."
             raise ValueError(err)
 
-    return df_censo
+    return df_censo.set_index("cvegeo").pipe(
+        cast_all_columns_to_numeric, make_valid_int=True
+    )
 
 
-@dg.asset(key=["census_geometries"], partitions_def=zone_partitions)
-def census_geometries(postgis_resource: PostGISResource) -> gpd.GeoDataFrame:
-    with postgis_resource.connect() as conn:
-        gdf = gpd.read_postgis(
+@dg.asset(
+    key=["census_geometries"],
+    io_manager_key="geodataframe_file_manager",
+    partitions_def=zone_partitions,
+    group_name="census",
+)
+def census_geometries(
+    context: dg.AssetExecutionContext, postgres_resource: PostgresResource
+) -> gpd.GeoDataFrame:
+    with postgres_resource.connect() as conn:
+        return gpd.read_postgis(
             """
-            SELECT cvegeo, geometry
-            FROM census_2020_ageb
+            SELECT census_2020_ageb.cvegeo, census_2020_ageb.geometry
+                FROM census_2020_ageb
+            INNER JOIN census_2020_mun
+                ON census_2020_ageb.cve_mun = census_2020_mun.cvegeo
+            WHERE census_2020_mun.cve_met = %(zone)s
             """,
             conn,
             geom_col="geometry",
-        )
-    return gdf
+            params={"zone": context.partition_key},
+        ).set_index("cvegeo")

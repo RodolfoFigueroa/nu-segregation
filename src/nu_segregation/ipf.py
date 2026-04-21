@@ -1,4 +1,4 @@
-from pathlib import Path
+from collections.abc import Sequence
 
 import geopandas as gpd
 import numpy as np
@@ -253,17 +253,47 @@ def weight_ind_fast(df: pd.DataFrame, ds: xr.DataArray) -> pd.DataFrame:
     return df_w
 
 
-def get_geometries_from_cvegeos(cvegeos: list[str], *, engine):
-    pass
-
-
 def get_income_df(
     ds: xr.DataArray,
-    df_censo: pd.DataFrame,
+    df_census: pd.DataFrame,
+    df_census_geometry: gpd.GeoDataFrame,
     df_ind: pd.DataFrame,
-    data_path: Path,
-    agebs: list[str],
-) -> pd.DataFrame:
+) -> gpd.GeoDataFrame:
+    """
+    Build a GeoDataFrame with IPF-estimated income distribution and income aggregates per AGEB.
+    This function computes, for each AGEB in ``agebs``, the estimated population by
+    income bracket from an ``xarray.DataArray`` of local contingency tables. It then
+    derives total IPF population, merges census totals and geometry, and computes
+    total and per-capita income using individual-level income data.
+    Args:
+        ds (xr.DataArray):
+            Multidimensional IPF output containing at least the dimensions
+            ``"cvegeo"`` and ``"Ingreso"``. Values are marginalized over all other
+            dimensions.
+        df_census (pd.DataFrame):
+            Census table indexed by AGEB (``cvegeo``) with at least column
+            ``"p_15ymas"`` (population aged 15+).
+        df_census_geometry (gpd.GeoDataFrame):
+            GeoDataFrame indexed by AGEB (``cvegeo``) containing a ``geometry``
+            column and CRS information.
+        df_ind (pd.DataFrame):
+            Individual-level table containing AGEB indicator/weight columns listed
+            in ``agebs`` and column ``"Ingreso_orig"`` for original income values.
+    Returns:
+        gpd.GeoDataFrame:
+            GeoDataFrame with one row per AGEB and:
+            - income-bracket columns renamed as ``q_0`` ... ``q_9`` (when present),
+            - ``total_ipf``: sum across income brackets,
+            - ``total_census``: census population (from ``p_15ymas``),
+            - ``income``: total income aggregated from ``df_ind``,
+            - ``income_pc``: per-capita income computed as ``income / total_ipf``,
+            - ``geometry`` and CRS inherited from ``df_census_geometry``.
+    Notes:
+        The function assumes index alignment across inputs by AGEB key (``cvegeo``)
+        for joins to produce correct results.
+    """
+    agebs = df_census.index.to_list()
+
     income_by_ageb = (
         df_ind[agebs]
         .multiply(df_ind["Ingreso_orig"], axis="index")
@@ -272,36 +302,95 @@ def get_income_df(
     )
 
     wanted_dims = [d for d in ds.dims if d not in ["cvegeo", "Ingreso"]]
-    pop_income = (
+
+    return (
         ds.sel(cvegeo=agebs)
         .sum(dim=wanted_dims)
         .to_dataframe(name="values")
         .reset_index()
         .pivot_table(index="cvegeo", columns="Ingreso", values="values")
-        .assign(total_ipf=lambda df: df.sum(axis=1))
-        .join(df_censo["p_15ymas"])
-        .rename(columns={"p_15ymas": "total_census"})
+        .assign(total_ipf=lambda df: df.sum(axis=1), total_census=df_census["p_15ymas"])
         .join(income_by_ageb)
         .assign(income_pc=lambda df: df["income"] / df["total_ipf"])
-    )
-
-    # Import geo data
-    scodes = np.unique([a[:2] for a in agebs])
-    agebs_gdf = (
-        pd.concat(
-            [
-                gpd.read_file(f"{data_path}/agebs.zip", layer=f"{scode}a")
-                for scode in scodes
-            ],
-        )
-        .pipe(gpd.GeoDataFrame, crs="EPSG:6372", geometry="geometry")
-        .pipe(lambda df: df.to_crs(df.estimate_utm_crs()))
-    )
-    agebs_gdf.columns = [i.lower() for i in agebs_gdf.columns]
-    agebs_gdf = agebs_gdf.set_index("cvegeo")[["geometry"]]
-
-    return (
-        agebs_gdf.join(pop_income, how="right")
+        .join(df_census_geometry, how="left")
         .reset_index()
         .rename(columns={i: f"q_{i}" for i in range(10)})
+        .pipe(
+            lambda df: gpd.GeoDataFrame(
+                df, geometry="geometry", crs=df_census_geometry.crs
+            )
+        )
+    )
+
+
+def generate_contingency_table(
+    df_survey: pd.DataFrame, linking_cols: Sequence[str]
+) -> xr.DataArray:
+    """
+    Generate a contingency table from a survey DataFrame.
+    Args:
+        df_survey (pd.DataFrame): Survey DataFrame containing the data to be used
+            for the contingency table generation.
+        linking_cols (Sequence[str]): List of column names to be used as the
+            rows of the contingency table.
+    Returns:
+        xr.DataArray: A multidimensional contingency table with the linking columns
+            as dimensions and the income column as the last dimension.
+    Raises:
+        TypeError: If the output of the contingency table generation is not an
+            xarray DataArray.
+    """
+
+    out = (
+        pd.crosstab(
+            [df_survey[c] for c in linking_cols],
+            df_survey["Ingreso"],
+            dropna=False,
+        )
+        .stack()
+        .to_xarray()
+        .astype(float)
+    )
+
+    if not isinstance(out, xr.DataArray):
+        err = "Output of contingency table generation must be an xarray DataArray. Check the dimensions of the crosstab output."
+        raise TypeError(err)
+
+    return out
+
+
+def generate_individual_weights(
+    df_survey: pd.DataFrame, ds: xr.DataArray
+) -> pd.DataFrame:
+    """
+    Generate individual weights for survey respondents based on a given dataset.
+    Args:
+        df_survey (pd.DataFrame): Survey dataframe containing individual-level data,
+            including an 'Ingreso_orig' column and additional linking category columns
+            used as a multi-index.
+        ds (xr.DataArray): DataArray containing the target marginal distributions
+            used for Iterative Proportional Fitting (IPF).
+    Returns:
+        pd.DataFrame: A dataframe indexed by the linking categories, containing
+            individual weights for each AGEB (geostatistical basic area) and a
+            summary column 'w_MZ' representing the total weight across the
+            metropolitan zone for each individual.
+    Notes:
+        - The function uses Iterative Proportional Fitting (IPF) via
+          `ipf.weight_ind_fast` to compute individual weights.
+        - The 'w_MZ' column is computed as the row-wise sum of all AGEB weight
+          columns, excluding 'Ingreso_orig'.
+    """
+
+    # Create a df of individuals from survey dataframe
+    # with multi index on linking categories
+    return (
+        df_survey.set_index(list(df_survey.columns.drop("Ingreso_orig")))
+        .sort_index()
+        .pipe(
+            lambda df: weight_ind_fast(df, ds)
+        )  # Add individual weights for each ageb
+        .assign(
+            w_MZ=lambda df: df.drop(columns=["Ingreso_orig"]).sum(axis=1)
+        )  # Sum weights for all met zone
     )

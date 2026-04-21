@@ -3,11 +3,11 @@ import zipfile
 from pathlib import Path
 
 import pandas as pd
-from dagster_components.partitions import zone_partitions
-from dagster_components.resources import PostGISResource
+from dagster_components.resources import PostgresResource
 from dagster_components.utils import cast_all_columns_to_numeric
 
 import dagster as dg
+from nu_segregation.defs.partitions import year_and_zone_partitions
 from nu_segregation.defs.resources import PathResource
 
 
@@ -17,16 +17,18 @@ def fix_folioviv(s: pd.Series) -> pd.Series:
 
 @dg.op
 def get_muns_from_zone(
-    context: dg.OpExecutionContext, postgis_resource: PostGISResource
+    context: dg.OpExecutionContext, postgres_resource: PostgresResource
 ) -> list[str]:
-    with postgis_resource.connect() as conn:
+    zone = context.multi_partition_key.keys_by_dimension["zone"]
+
+    with postgres_resource.connect() as conn:
         df = pd.read_sql(
             """
             SELECT cvegeo FROM census_2020_mun
             WHERE cve_met = %(zone)s
             """,
             conn,
-            params={"zone": context.partition_key},
+            params={"zone": zone},
         )
     return df["cvegeo"].tolist()
 
@@ -36,20 +38,35 @@ stems = ["vivienda", "ingresos", "hogares", "poblacion"]
 
 @dg.op(out={stem: dg.Out() for stem in stems})
 def extract_enigh_census(
+    context: dg.OpExecutionContext,
     path_resource: PathResource,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    year = context.multi_partition_key.keys_by_dimension["year"]
+
     data_path = Path(path_resource.data_path)
+
+    if year == "2018":
+        zf_path = data_path / "conjunto_de_datos_enigh_2018_ns_csv.zip"
+    else:
+        zf_path = data_path / f"conjunto_de_datos_enigh_ns_{year}_csv.zip"
 
     out = []
     with (
         tempfile.TemporaryDirectory() as tmpdir,
-        zipfile.ZipFile(data_path / "conjunto_de_datos_enigh_2018_ns_csv.zip") as zf,
+        zipfile.ZipFile(zf_path, "r") as zf,
     ):
         zf.extractall(tmpdir)
         tmpdir_path = Path(tmpdir)
 
         for stem in stems:
-            subdir_name = f"conjunto_de_datos_{stem}_enigh_2018_ns"
+            if stem == "vivienda" and year != "2018":
+                stem = "viviendas"  # noqa: PLW2901
+
+            if year == "2022":
+                subdir_name = f"conjunto_de_datos_{stem}_enigh{year}_ns"
+            else:
+                subdir_name = f"conjunto_de_datos_{stem}_enigh_{year}_ns"
+
             fpath = next(
                 (tmpdir_path / subdir_name / "conjunto_de_datos").glob(
                     "conjunto_de_datos_*.csv"
@@ -61,14 +78,14 @@ def extract_enigh_census(
 
 
 @dg.op
-def process_fol_df(df_fol: pd.DataFrame, muns: list[str]) -> pd.DataFrame:  # noqa: ARG001
+def process_fol_df(df_fol: pd.DataFrame, muns: list[str]) -> pd.DataFrame:
     return (
         df_fol[["folioviv", "ubica_geo"]]
         .assign(
             folioviv=lambda df: df["folioviv"].transform(fix_folioviv),
             ubica_geo=lambda df: df["ubica_geo"].astype(str).str.zfill(5),
         )
-        .query("ubica_geo in @muns")
+        .loc[lambda df: df["ubica_geo"].isin(muns)]
     )
 
 
@@ -81,6 +98,7 @@ def process_income_df(df_income: pd.DataFrame) -> pd.DataFrame:
         .groupby(["folioviv", "foliohog", "numren"])
         .agg(sum)
         .reset_index()
+        .rename(columns={"ing_tri": "Ingreso"}, errors="raise")
     )
 
 
@@ -90,6 +108,14 @@ def process_home_df(df_home: pd.DataFrame) -> pd.DataFrame:
         df_home[["folioviv", "foliohog", "conex_inte"]]
         .assign(folioviv=lambda df: df["folioviv"].transform(fix_folioviv))
         .pipe(cast_all_columns_to_numeric, ignore=["folioviv"], errors="raise")
+        .rename(columns={"conex_inte": "ConexionInt"}, errors="raise")
+        .assign(
+            ConexionInt=lambda df: (
+                df["ConexionInt"]
+                .astype("category")
+                .cat.rename_categories({1: "internet", 2: "no_internet"})
+            ),
+        )
     )
 
 
@@ -114,45 +140,16 @@ def process_pop_df(df_pop: pd.DataFrame) -> pd.DataFrame:
         .assign(folioviv=lambda df: df["folioviv"].transform(fix_folioviv))
         .pipe(cast_all_columns_to_numeric, ignore=["folioviv"], errors="raise")
         .query("edad >= 15")
-    )
-
-
-@dg.op
-def merge_dfs(
-    df_fol: pd.DataFrame,
-    df_income: pd.DataFrame,
-    df_home: pd.DataFrame,
-    df_pop: pd.DataFrame,
-) -> pd.DataFrame:
-    out = (
-        df_fol.merge(df_pop, how="left")
-        .merge(df_income, how="left")
-        .merge(df_home, how="left")
-        .reset_index(drop=True)
         .rename(
             columns={
-                "des_mun": "Municipio",
                 "sexo": "Sexo",
                 "edad": "Edad",
                 "nivelaprob": "Nivel",
-                "edo_conyug": "EstadoConyu",
                 "inst_1": "SeguroIMSS",
                 "inst_6": "SeguroPriv",
-                "conex_inte": "ConexionInt",
-                "ing_tri": "Ingreso",
-            }
-        )
-        .filter(
-            [
-                "Sexo",
-                "Edad",
-                "Nivel",
-                "SeguroIMSS",
-                "SeguroPriv",
-                "ConexionInt",
-                "Ingreso",
-            ],
-            axis="columns",
+                "edo_conyug": "EstadoConyu",
+            },
+            errors="raise",
         )
         .assign(
             Sexo=lambda df: (
@@ -179,21 +176,44 @@ def merge_dfs(
                 .astype("category")
                 .cat.rename_categories({0: "no_privado", 6: "privado"})
             ),
-            ConexionInt=lambda df: (
-                df["ConexionInt"]
-                .astype("category")
-                .cat.rename_categories({1: "internet", 2: "no_internet"})
-            ),
+        )
+    )
+
+
+@dg.op(out=dg.Out(io_manager_key="dataframe_manager"))
+def merge_dfs(
+    df_fol: pd.DataFrame,
+    df_income: pd.DataFrame,
+    df_home: pd.DataFrame,
+    df_pop: pd.DataFrame,
+) -> pd.DataFrame:
+    return (
+        df_fol.merge(df_pop, how="left")
+        .merge(df_income, how="left")
+        .merge(df_home, how="left")
+        .reset_index(drop=True)
+        .filter(
+            [
+                "Sexo",
+                "Edad",
+                "Nivel",
+                "SeguroIMSS",
+                "SeguroPriv",
+                "ConexionInt",
+                "Ingreso",
+            ],
+            axis="columns",
+        )
+        .assign(
             Ingreso_new=lambda df: pd.qcut(df["Ingreso"], 5, labels=list(range(1, 6))),
         )
-        .rename(columns={"Ingreso": "Ingreso_orig"})
-        .rename(columns={"Ingreso_new": "Ingreso"})
+        .rename(columns={"Ingreso": "Ingreso_orig"}, errors="raise")
+        .rename(columns={"Ingreso_new": "Ingreso"}, errors="raise")
+        .dropna(subset=["Ingreso"])
     )
-    out.to_parquet("./survey.parquet")
-    return out
 
 
-@dg.graph_asset(partitions_def=zone_partitions, group_name="survey")
+@dg.graph_asset(partitions_def=year_and_zone_partitions, group_name="survey")
 def survey():
     muns = get_muns_from_zone()
 
